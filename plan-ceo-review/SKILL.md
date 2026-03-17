@@ -113,7 +113,7 @@ Do NOT make any code changes. Do NOT start implementation. Your only job right n
 
 ## Prime Directives
 1. Zero silent failures. Every failure mode must be visible — to the system, to the team, to the user. If a failure can happen silently, that is a critical defect in the plan.
-2. Every error has a name. Don't say "handle errors." Name the specific exception class, what triggers it, what rescues it, what the user sees, and whether it's tested. rescue StandardError is a code smell — call it out.
+2. Every error has a name. Don't say "handle errors." Name the specific exception class, what triggers it, what catches it, what the operator sees, and whether it's tested. `catch (Exception)` is a code smell — call it out.
 3. Data flows have shadow paths. Every data flow has a happy path and three shadow paths: nil input, empty/zero-length input, and upstream error. Trace all four for every new flow.
 4. Interactions have edge cases. Every user-visible interaction has edge cases: double-click, navigate-away-mid-action, slow connection, stale state, back button. Map them.
 5. Observability is scope, not afterthought. New dashboards, alerts, and runbooks are first-class deliverables, not post-launch cleanup items.
@@ -146,8 +146,8 @@ Run the following commands:
 git log --oneline -30                          # Recent history
 git diff <base> --stat                           # What's already changed
 git stash list                                 # Any stashed work
-grep -r "TODO\|FIXME\|HACK\|XXX" --include="*.rb" --include="*.js" -l
-find . -name "*.rb" -newer Gemfile.lock | head -20  # Recently touched files
+grep -r "TODO\|FIXME\|HACK\|XXX" --include="*.cs" --include="*.csproj" -l
+find . -name "*.cs" -newer *.csproj 2>/dev/null | head -20  # Recently touched files
 ```
 Then read CLAUDE.md, TODOS.md, and any existing architecture docs. When reading TODOS.md, specifically:
 * Note any TODOs this plan touches, blocks, or unlocks
@@ -255,29 +255,28 @@ Required ASCII diagram: full system architecture showing new components and thei
 This is the section that catches silent failures. It is not optional.
 For every new method, service, or codepath that can fail, fill in this table:
 ```
-  METHOD/CODEPATH          | WHAT CAN GO WRONG           | EXCEPTION CLASS
-  -------------------------|-----------------------------|-----------------
-  ExampleService#call      | API timeout                 | Faraday::TimeoutError
-                           | API returns 429             | RateLimitError
-                           | API returns malformed JSON  | JSON::ParserError
-                           | DB connection pool exhausted| ActiveRecord::ConnectionTimeoutError
-                           | Record not found            | ActiveRecord::RecordNotFound
-  -------------------------|-----------------------------|-----------------
+  METHOD/CODEPATH             | WHAT CAN GO WRONG              | EXCEPTION CLASS
+  ----------------------------|--------------------------------|---------------------------
+  StageController.MoveTo()    | Communication timeout          | TimeoutException
+                              | Response parse error           | InvalidDataException
+                              | Position out of soft limit     | ArgumentOutOfRangeException
+                              | Device in error state          | InvalidOperationException
+  ----------------------------|--------------------------------|---------------------------
 
-  EXCEPTION CLASS              | RESCUED?  | RESCUE ACTION          | USER SEES
-  -----------------------------|-----------|------------------------|------------------
-  Faraday::TimeoutError        | Y         | Retry 2x, then raise   | "Service temporarily unavailable"
-  RateLimitError               | Y         | Backoff + retry         | Nothing (transparent)
-  JSON::ParserError            | N ← GAP   | —                      | 500 error ← BAD
-  ConnectionTimeoutError       | N ← GAP   | —                      | 500 error ← BAD
-  ActiveRecord::RecordNotFound | Y         | Return nil, log warning | "Not found" message
+  EXCEPTION CLASS              | CAUGHT?   | CATCH ACTION                  | OPERATOR SEES
+  -----------------------------|-----------|-------------------------------|---------------------------
+  TimeoutException             | Y         | Retry 2x, then safe-state     | "Stage timeout — homing required"
+  ArgumentOutOfRangeException  | Y         | Reject command, log warning   | Limit warning in status bar
+  InvalidOperationException    | N ← GAP   | —                             | Silent failure ← BAD
+  IOException (port closed)    | N ← GAP   | —                             | No feedback ← BAD
+  NullReferenceException       | N ← GAP   | —                             | App crash ← BAD
 ```
 Rules for this section:
-* `rescue StandardError` is ALWAYS a smell. Name the specific exceptions.
-* `rescue => e` with only `Rails.logger.error(e.message)` is insufficient. Log the full context: what was being attempted, with what arguments, for what user/request.
-* Every rescued error must either: retry with backoff, degrade gracefully with a user-visible message, or re-raise with added context. "Swallow and continue" is almost never acceptable.
-* For each GAP (unrescued error that should be rescued): specify the rescue action and what the user should see.
-* For LLM/AI service calls specifically: what happens when the response is malformed? When it's empty? When it hallucinates invalid JSON? When the model returns a refusal? Each of these is a distinct failure mode.
+* `catch (Exception)` is ALWAYS a smell. Name the specific exception types.
+* `catch (Exception ex) { Logger.Error(ex.Message); }` is insufficient. Log full context: what command was sent, to which device, what state the device was in.
+* Every caught exception must either: retry with safe-state restoration, degrade gracefully with an operator-visible status update, or re-throw with added context. Swallowing exceptions silently is never acceptable.
+* For each GAP (uncaught exception that should be caught): specify the catch action and what the operator should see.
+* For device communication specifically: what happens when the response is garbled? When it times out mid-sequence? When the device returns an unexpected status code? Each is a distinct failure mode.
 **STOP.** AskUserQuestion once per issue. Do NOT batch. Recommend + WHY. If no issues or fix is obvious, state what you'll do and move on — don't waste a question. Do NOT proceed until user responds.
 
 ### Section 3: Security & Threat Model
@@ -312,21 +311,23 @@ For each node: what happens on each shadow path? Is it tested?
 
 **Interaction Edge Cases:** For every new user-visible interaction, evaluate:
 ```
-  INTERACTION          | EDGE CASE              | HANDLED? | HOW?
-  ---------------------|------------------------|----------|--------
-  Form submission      | Double-click submit    | ?        |
-                       | Submit with stale CSRF | ?        |
-                       | Submit during deploy   | ?        |
-  Async operation      | User navigates away    | ?        |
-                       | Operation times out    | ?        |
-                       | Retry while in-flight  | ?        |
-  List/table view      | Zero results           | ?        |
-                       | 10,000 results         | ?        |
-                       | Results change mid-page| ?        |
-  Background job       | Job fails after 3 of   | ?        |
-                       | 10 items processed     |          |
-                       | Job runs twice (dup)   | ?        |
-                       | Queue backs up 2 hours | ?        |
+  INTERACTION              | EDGE CASE                        | HANDLED? | HOW?
+  -------------------------|----------------------------------|----------|--------
+  Move button click        | Double-click (two commands sent) | ?        |
+                           | Click during existing move       | ?        |
+                           | Click when device in Error state | ?        |
+  Async device operation   | User closes form mid-operation   | ?        |
+                           | Operation times out              | ?        |
+                           | Emergency stop pressed mid-move  | ?        |
+  Parameter input field    | Value out of safe range          | ?        |
+                           | Non-numeric input                | ?        |
+                           | Paste of large clipboard value   | ?        |
+  Device connection        | Cable unplugged mid-operation    | ?        |
+                           | Device powered off unexpectedly  | ?        |
+                           | Re-connect without app restart   | ?        |
+  Camera acquisition       | Frame timeout                    | ?        |
+                           | Buffer overflow                  | ?        |
+                           | Trigger signal missed            | ?        |
 ```
 Flag any unhandled edge case as a gap. For each gap, specify the fix.
 **STOP.** AskUserQuestion once per issue. Do NOT batch. Recommend + WHY. If no issues or fix is obvious, state what you'll do and move on — don't waste a question. Do NOT proceed until user responds.
@@ -383,15 +384,15 @@ Load/stress test requirements: For any new codepath called frequently or process
 For LLM/prompt changes: Check CLAUDE.md for the "Prompt/LLM changes" file patterns. If this plan touches ANY of those patterns, state which eval suites must be run, which cases should be added, and what baselines to compare against.
 **STOP.** AskUserQuestion once per issue. Do NOT batch. Recommend + WHY. If no issues or fix is obvious, state what you'll do and move on — don't waste a question. Do NOT proceed until user responds.
 
-### Section 7: Performance Review
+### Section 7: Performance & Real-Time Review
 Evaluate:
-* N+1 queries. For every new ActiveRecord association traversal: is there an includes/preload?
-* Memory usage. For every new data structure: what's the maximum size in production?
-* Database indexes. For every new query: is there an index?
-* Caching opportunities. For every expensive computation or external call: should it be cached?
-* Background job sizing. For every new job: worst-case payload, runtime, retry behavior?
-* Slow paths. Top 3 slowest new codepaths and estimated p99 latency.
-* Connection pool pressure. New DB connections, Redis connections, HTTP connections?
+* Control loop timing. For every new device polling or feedback loop: what is the required cycle time? Is Thread.Sleep or a Timer used? Is jitter acceptable?
+* UI thread blocking. For every device operation: does it block the UI thread? Is it correctly offloaded to Task/BackgroundWorker with proper cancellation?
+* Buffer sizing. For every new communication buffer (serial, USB, camera frame): what is worst-case size? Is there a bound on accumulation?
+* Camera throughput. For every new image acquisition path: what is the frame rate? Is the processing pipeline fast enough to avoid frame drops?
+* Memory usage. For every new data structure holding device data or images: what is the maximum size in a long-running session (8+ hours)?
+* Startup time. For every new device initialization sequence: what is worst-case time? Does the UI remain responsive during init?
+* Slow paths. Top 3 slowest new codepaths and estimated worst-case latency at each.
 **STOP.** AskUserQuestion once per issue. Do NOT batch. Recommend + WHY. If no issues or fix is obvious, state what you'll do and move on — don't waste a question. Do NOT proceed until user responds.
 
 ### Section 8: Observability & Debuggability Review
@@ -410,19 +411,18 @@ Evaluate:
 * What observability would make this feature a joy to operate?
 **STOP.** AskUserQuestion once per issue. Do NOT batch. Recommend + WHY. If no issues or fix is obvious, state what you'll do and move on — don't waste a question. Do NOT proceed until user responds.
 
-### Section 9: Deployment & Rollout Review
+### Section 9: Release & Rollout Review
 Evaluate:
-* Migration safety. For every new DB migration: backward-compatible? Zero-downtime? Table locks?
-* Feature flags. Should any part be behind a feature flag?
-* Rollout order. Correct sequence: migrate first, deploy second?
-* Rollback plan. Explicit step-by-step.
-* Deploy-time risk window. Old code and new code running simultaneously — what breaks?
-* Environment parity. Tested in staging?
-* Post-deploy verification checklist. First 5 minutes? First hour?
-* Smoke tests. What automated checks should run immediately post-deploy?
+* Installer safety. Is the installer backward-compatible with existing device configuration files and calibration data? Does it upgrade data formats gracefully?
+* Rollback plan. If this version is broken, how does the operator revert? Is the previous installer retained? Are configuration files preserved?
+* Device firmware compatibility. If device firmware is also changing: what is the minimum firmware version this release requires? Is the check enforced at startup?
+* Staged rollout. Should this be deployed to one machine first before fleet-wide rollout? What is the rollout sequence?
+* Configuration migration. Are any configuration files, calibration data, or parameter files changing format? Is migration automatic or manual?
+* Smoke test checklist. After installation: which device connections must be verified? Which automated self-tests should pass before handing off to the operator?
+* Post-deploy verification. First 10 minutes checklist — what must work before the operator uses the system?
 
 **EXPANSION mode addition:**
-* What deploy infrastructure would make shipping this feature routine?
+* What release infrastructure (auto-update, silent install, remote deployment) would make shipping routine?
 **STOP.** AskUserQuestion once per issue. Do NOT batch. Recommend + WHY. If no issues or fix is obvious, state what you'll do and move on — don't waste a question. Do NOT proceed until user responds.
 
 ### Section 10: Long-Term Trajectory Review
@@ -431,7 +431,7 @@ Evaluate:
 * Path dependency. Does this make future changes harder?
 * Knowledge concentration. Documentation sufficient for a new engineer?
 * Reversibility. Rate 1-5: 1 = one-way door, 5 = easily reversible.
-* Ecosystem fit. Aligns with Rails/JS ecosystem direction?
+* Ecosystem fit. Aligns with .NET / WinForms long-term support roadmap? (.NET 8 LTS recommended)
 * The 1-year question. Read this plan as a new engineer in 12 months — obvious?
 
 **EXPANSION mode additions:**

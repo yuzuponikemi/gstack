@@ -2,10 +2,11 @@
 name: qa-only
 version: 1.0.0
 description: |
-  Report-only QA testing. Systematically tests a web application and produces a
-  structured report with health score, screenshots, and repro steps — but never
-  fixes anything. Use when asked to "just report bugs", "qa report only", or
-  "test but don't fix". For the full test-fix-verify loop, use /qa instead.
+  Report-only QA for C# WinForms device control systems. Runs the automated test
+  suite, checks device connectivity, validates UI smoke tests, and produces a
+  structured health report — but never fixes anything. Use when asked to "just
+  report bugs", "qa report only", or "test but don't fix". For the full
+  test-fix-verify loop, use /qa instead.
 allowed-tools:
   - Bash
   - Read
@@ -15,9 +16,9 @@ allowed-tools:
 
 {{PREAMBLE}}
 
-# /qa-only: Report-Only QA Testing
+# /qa-only: Report-Only QA for Device Control Systems
 
-You are a QA engineer. Test web applications like a real user — click everything, fill every form, check every state. Produce a structured report with evidence. **NEVER fix anything.**
+You are a QA engineer for a C# WinForms device control application. Run the automated test suite, perform smoke checks, and produce a structured report with health score and repro steps. **NEVER fix anything.**
 
 ## Setup
 
@@ -25,75 +26,199 @@ You are a QA engineer. Test web applications like a real user — click everythi
 
 | Parameter | Default | Override example |
 |-----------|---------|-----------------:|
-| Target URL | (auto-detect or required) | `https://myapp.com`, `http://localhost:3000` |
-| Mode | full | `--quick`, `--regression .gstack/qa-reports/baseline.json` |
+| Mode | full | `--quick`, `--unit-only` |
 | Output dir | `.gstack/qa-reports/` | `Output to /tmp/qa` |
-| Scope | Full app (or diff-scoped) | `Focus on the billing page` |
-| Auth | None | `Sign in to user@example.com`, `Import cookies from cookies.json` |
-
-**If no URL is given and you're on a feature branch:** Automatically enter **diff-aware mode** (see Modes below). This is the most common case — the user just shipped code on a branch and wants to verify it works.
-
-**Find the browse binary:**
-
-{{BROWSE_SETUP}}
+| Scope | Full suite | `Focus on stage controller` |
 
 **Create output directories:**
 
 ```bash
 REPORT_DIR=".gstack/qa-reports"
-mkdir -p "$REPORT_DIR/screenshots"
+mkdir -p "$REPORT_DIR"
 ```
 
 ---
 
 ## Test Plan Context
 
-Before falling back to git diff heuristics, check for richer test plan sources:
+Before running tests, check for richer test plan sources:
 
 1. **Project-scoped test plans:** Check `~/.gstack/projects/` for recent `*-test-plan-*.md` files for this repo
    ```bash
    SLUG=$(git remote get-url origin 2>/dev/null | sed 's|.*[:/]\([^/]*/[^/]*\)\.git$|\1|;s|.*[:/]\([^/]*/[^/]*\)$|\1|' | tr '/' '-')
    ls -t ~/.gstack/projects/$SLUG/*-test-plan-*.md 2>/dev/null | head -1
    ```
-2. **Conversation context:** Check if a prior `/plan-eng-review` or `/plan-ceo-review` produced test plan output in this conversation
+2. **Conversation context:** Check if a prior `/plan-eng-review` or `/plan-ceo-review` produced a test plan in this conversation
 3. **Use whichever source is richer.** Fall back to git diff analysis only if neither is available.
 
 ---
 
-{{QA_METHODOLOGY}}
+## Modes
+
+### Diff-aware (automatic when on a feature branch)
+
+When the user says `/qa-only` without specifying scope and the repo is on a feature branch, automatically:
+
+1. **Analyze the branch diff** to understand what changed:
+   ```bash
+   git diff main...HEAD --name-only
+   git log main..HEAD --oneline
+   ```
+
+2. **Identify affected components** from the changed `.cs` files:
+   - Device controller files → which device and operations they cover
+   - Form/panel files → which UI screens are affected
+   - Service/helper files → which operations use those services
+
+3. **Scope the test run** to focus on changed subsystems.
+
+### Full (default)
+Run all automated tests + full smoke checklist. Produces complete health report.
+
+### Quick (`--quick`)
+Run only fast unit tests (skip long-running integration tests). Check application startup and one device connection per subsystem.
+
+### Unit-only (`--unit-only`)
+Run unit tests only. Skip all device connectivity checks. Useful when hardware is not connected.
 
 ---
 
-## Output
+## Phase 1: Automated Test Suite
+
+Run the automated tests:
+
+```bash
+dotnet test --logger "console;verbosity=normal" 2>&1 | tee "$REPORT_DIR/test-output.txt"
+```
+
+Parse the output and record:
+- Total tests run
+- Pass / fail / skip counts
+- Names and messages of any failing tests
+- Total duration
+
+**If tests cannot run** (build error, missing SDK): record as BLOCKED and continue to Phase 2 with a warning.
+
+---
+
+## Phase 2: Build Health Check
+
+```bash
+dotnet build 2>&1 | tee "$REPORT_DIR/build-output.txt"
+```
+
+Record:
+- Build success / failure
+- Warning count (flag if > 10 warnings)
+- Error messages if failed
+
+---
+
+## Phase 3: Static Code Smoke Check
+
+```bash
+# Find any obvious issues in recently changed files
+git diff main...HEAD --name-only -- "*.cs" | head -20
+grep -rn "TODO\|FIXME\|HACK\|throw new NotImplementedException" --include="*.cs" $(git diff main...HEAD --name-only -- "*.cs" | head -20 | tr '\n' ' ') 2>/dev/null | head -30
+```
+
+Record any `NotImplementedException`, `TODO`, or `FIXME` in the changed files.
+
+---
+
+## Phase 4: Device Connectivity Smoke Test
+
+**Skip this phase if `--unit-only` is specified or if this is a CI environment.**
+
+For each device subsystem present in the codebase, check if the configuration file exists and connectivity can be verified without moving hardware:
+
+```bash
+# Check for device configuration files
+find . -name "*.json" -o -name "*.xml" -o -name "*.ini" | grep -i "config\|settings\|device" | head -10
+```
+
+Report which device configurations are present and flag any obviously missing required files.
+
+**Do NOT send move commands or activate hardware.** Connectivity checks only.
+
+---
+
+## Phase 5: UI Smoke Checklist
+
+If the application can be built, verify these static properties by reading source files:
+
+1. **Form initialization**: Are all `InitializeComponent()` calls present in Designer.cs files?
+2. **Event handler wiring**: For each button in changed forms, is there a corresponding `_Click` handler?
+3. **Cross-thread safety**: In changed forms, are `InvokeRequired` checks present for UI updates from background threads?
+4. **Resource disposal**: Do changed forms implement `IDisposable`? Do they call `Dispose()` on device objects?
+
+```bash
+# Check for missing InvokeRequired in changed form files
+for f in $(git diff main...HEAD --name-only -- "*Form*.cs" "*Panel*.cs"); do
+  echo "=== $f ==="; grep -n "this\.\|Invoke\|InvokeRequired" "$f" 2>/dev/null | head -10
+done
+```
+
+---
+
+## Phase 6: Report
 
 Write the report to both local and project-scoped locations:
 
-**Local:** `.gstack/qa-reports/qa-report-{domain}-{YYYY-MM-DD}.md`
+**Local:** `.gstack/qa-reports/qa-report-{YYYY-MM-DD}.md`
 
-**Project-scoped:** Write test outcome artifact for cross-session context:
+**Project-scoped:**
 ```bash
 SLUG=$(git remote get-url origin 2>/dev/null | sed 's|.*[:/]\([^/]*/[^/]*\)\.git$|\1|;s|.*[:/]\([^/]*/[^/]*\)$|\1|' | tr '/' '-')
 mkdir -p ~/.gstack/projects/$SLUG
 ```
 Write to `~/.gstack/projects/{slug}/{user}-{branch}-test-outcome-{datetime}.md`
 
-### Output Structure
+### Report Structure
 
-```
-.gstack/qa-reports/
-├── qa-report-{domain}-{YYYY-MM-DD}.md    # Structured report
-├── screenshots/
-│   ├── initial.png                        # Landing page annotated screenshot
-│   ├── issue-001-step-1.png               # Per-issue evidence
-│   ├── issue-001-result.png
-│   └── ...
-└── baseline.json                          # For regression mode
+```markdown
+# QA Report — {branch} — {YYYY-MM-DD}
+
+## Health Score: {0-100}
+
+| Category              | Status | Notes |
+|-----------------------|--------|-------|
+| Build                 | ✅/❌  | |
+| Unit Tests            | ✅/❌  | N pass, M fail |
+| Static Smoke Check    | ✅/⚠️  | N issues |
+| Device Config         | ✅/⚠️  | |
+| UI Wiring Check       | ✅/⚠️  | |
+
+## Failing Tests
+{list each failing test: name, error message, file:line if available}
+
+## Static Issues Found
+{list TODO/FIXME/NotImplementedException in changed files}
+
+## Device Config Issues
+{list missing or malformed config files}
+
+## UI Wiring Issues
+{list missing event handlers, InvokeRequired gaps}
+
+## Top 3 Issues to Fix
+{highest-severity items}
 ```
 
-Report filenames use the domain and date: `qa-report-myapp-com-2026-03-12.md`
+### Health Score Rubric
+
+| Category | Weight | Score |
+|----------|--------|-------|
+| Build success | 30% | 100 if clean, 0 if failed |
+| Test pass rate | 40% | (pass / total) × 100 |
+| Static smoke | 15% | 100 − (5 × issue count, min 0) |
+| UI wiring | 15% | 100 − (10 × issue count, min 0) |
 
 ---
 
-## Additional Rules (qa-only specific)
+## Additional Rules
 
-11. **Never fix bugs.** Find and document only. Do not read source code, edit files, or suggest fixes in the report. Your job is to report what's broken, not to fix it. Use `/qa` for the test-fix-verify loop.
+1. **Never fix bugs.** Find and document only. Do not edit files or suggest code fixes in the report. Use `/qa` for the test-fix-verify loop.
+2. **Never send device commands.** Do not run device initialization, move sequences, or any command that activates hardware.
+3. **Report incrementally.** Write each finding to the report as you find it.
+4. **Distinguish test failures from build failures.** A build failure that prevents tests from running is a BLOCKED state, not a test failure.

@@ -2,10 +2,10 @@
 name: qa-design-review
 version: 1.0.0
 description: |
-  Designer's eye QA: finds visual inconsistency, spacing issues, hierarchy problems,
-  AI slop patterns, and slow interactions — then fixes them. Iteratively fixes issues
-  in source code, committing each fix atomically and re-verifying with before/after
-  screenshots. For report-only mode, use /plan-design-review instead.
+  WinForms UI design audit: finds layout issues, control sizing problems, HiDPI
+  scaling failures, accessibility gaps, and Windows UX guideline violations — then
+  fixes them. Iteratively fixes issues in source code, committing each fix atomically.
+  For report-only mode, use /plan-design-review instead.
 allowed-tools:
   - Bash
   - Read
@@ -18,9 +18,9 @@ allowed-tools:
 
 {{PREAMBLE}}
 
-# /qa-design-review: Design Audit → Fix → Verify
+# /qa-design-review: WinForms UI Audit → Fix → Verify
 
-You are a senior product designer AND a frontend engineer. Review live sites with exacting visual standards — then fix what you find. You have strong opinions about typography, spacing, and visual hierarchy, and zero tolerance for generic or AI-generated-looking interfaces.
+You are a senior Windows UI designer AND a C# WinForms engineer. Review the application's UI source code and Designer files with exacting standards — then fix what you find. You have strong opinions about Windows UX guidelines, HiDPI scaling, accessibility, and control layout.
 
 ## Setup
 
@@ -28,18 +28,12 @@ You are a senior product designer AND a frontend engineer. Review live sites wit
 
 | Parameter | Default | Override example |
 |-----------|---------|-----------------:|
-| Target URL | (auto-detect or ask) | `https://myapp.com`, `http://localhost:3000` |
-| Scope | Full site | `Focus on the settings page`, `Just the homepage` |
-| Depth | Standard (5-8 pages) | `--quick` (homepage + 2), `--deep` (10-15 pages) |
-| Auth | None | `Sign in as user@example.com`, `Import cookies` |
+| Scope | All changed forms | `Focus on StageControlPanel`, `Just the main form` |
+| Depth | Standard | `--quick` (main form only), `--deep` (all forms) |
 
-**If no URL is given and you're on a feature branch:** Automatically enter **diff-aware mode** (see Modes below).
+**Check for DESIGN.md or UI guidelines:**
 
-**If no URL is given and you're on main/master:** Ask the user for a URL.
-
-**Check for DESIGN.md:**
-
-Look for `DESIGN.md`, `design-system.md`, or similar in the repo root. If found, read it — all design decisions must be calibrated against it. Deviations from the project's stated design system are higher severity. If not found, use universal design principles and offer to create one from the inferred system.
+Look for `DESIGN.md`, `UI-GUIDELINES.md`, or similar in the repo root. If found, read it — all design decisions must be calibrated against it. If not found, use Windows UX Guidelines and offer to create one.
 
 **Require clean working tree before starting:**
 
@@ -50,185 +44,245 @@ if [ -n "$(git status --porcelain)" ]; then
 fi
 ```
 
-**Find the browse binary:**
-
-{{BROWSE_SETUP}}
-
 **Create output directories:**
 
 ```bash
 REPORT_DIR=".gstack/design-reports"
-mkdir -p "$REPORT_DIR/screenshots"
+mkdir -p "$REPORT_DIR"
 ```
 
 ---
 
-## Phases 1-6: Design Audit Baseline
+## Phase 1: Inventory
 
-{{DESIGN_METHODOLOGY}}
+Identify all WinForms UI files in scope:
 
-Record baseline design score and AI slop score at end of Phase 6.
+```bash
+# Find all Designer.cs files (auto-generated layout) and their form counterparts
+find . -name "*.Designer.cs" | grep -v "obj\|bin" | head -30
 
----
-
-## Output Structure
-
-```
-.gstack/design-reports/
-├── design-audit-{domain}-{YYYY-MM-DD}.md    # Structured report
-├── screenshots/
-│   ├── first-impression.png                  # Phase 1
-│   ├── {page}-annotated.png                  # Per-page annotated
-│   ├── {page}-mobile.png                     # Responsive
-│   ├── {page}-tablet.png
-│   ├── {page}-desktop.png
-│   ├── finding-001-before.png                # Before fix
-│   ├── finding-001-after.png                 # After fix
-│   └── ...
-└── design-baseline.json                      # For regression mode
+# Find changed UI files on this branch
+git diff main...HEAD --name-only -- "*.cs" "*.resx" | grep -i "Form\|Panel\|Dialog\|Control"
 ```
 
----
-
-## Phase 7: Triage
-
-Sort all discovered findings by impact, then decide which to fix:
-
-- **High Impact:** Fix first. These affect the first impression and hurt user trust.
-- **Medium Impact:** Fix next. These reduce polish and are felt subconsciously.
-- **Polish:** Fix if time allows. These separate good from great.
-
-Mark findings that cannot be fixed from source code (e.g., third-party widget issues, content problems requiring copy from the team) as "deferred" regardless of impact.
+For each form in scope, record:
+- Form name and purpose
+- Controls present (buttons, labels, textboxes, comboboxes, etc.)
+- Approximate layout structure
 
 ---
 
-## Phase 8: Fix Loop
+## Phase 2: HiDPI & Scaling Audit
+
+WinForms HiDPI issues are the most common source of blurry or misaligned UIs on modern displays.
+
+For each form, check:
+
+```bash
+# Check AutoScaleMode setting in Designer files
+grep -n "AutoScaleMode\|AutoScaleDimensions" **/*.Designer.cs 2>/dev/null | head -20
+
+# Check for hardcoded pixel values that don't scale
+grep -n "new System.Drawing.Size\|new System.Drawing.Point\|\.Size =\|\.Location =" **/*.Designer.cs 2>/dev/null | head -30
+
+# Check for DPI awareness in app manifest or Program.cs
+grep -rn "DpiAwareness\|SetProcessDPIAware\|DpiAware\|PerMonitor" --include="*.cs" --include="*.manifest" . 2>/dev/null
+```
+
+**Common issues to flag:**
+- `AutoScaleMode = None` or missing — form won't scale on HiDPI displays
+- `AutoScaleDimensions` not set to `96F, 96F` baseline — relative scaling will be wrong
+- Fixed pixel sizes for controls that should stretch with DPI
+- Missing `Application.SetHighDpiMode(HighDpiMode.PerMonitorV2)` in `Program.cs` (requires .NET 5+)
+
+---
+
+## Phase 3: Layout & Control Design Audit
+
+### 3a. Control Sizing
+```bash
+# Find suspiciously small touch targets
+grep -n "\.Size = new.*([0-9]\+, [0-9]\+)" **/*.Designer.cs 2>/dev/null | awk -F'[(),]' '{if ($3+0 < 24 || $4+0 < 24) print NR": "$0}' | head -20
+```
+
+**Flag:**
+- Buttons smaller than 24×24px (should be at minimum 75×23 for standard buttons)
+- Labels with fixed width that will truncate on different font sizes
+- TextBoxes with width not anchored/docked — will not resize with window
+
+### 3b. Anchoring & Docking
+```bash
+grep -n "\.Anchor\|\.Dock" **/*.Designer.cs 2>/dev/null | head -30
+```
+
+**Flag:**
+- Controls with no Anchor and no Dock in a resizable form (they won't move when form resizes)
+- Controls anchored to wrong edges for their purpose (e.g., status label not anchored Bottom)
+- Mixing absolute layout with anchored controls in the same container
+
+### 3c. Tab Order
+```bash
+grep -n "\.TabIndex\|\.TabStop" **/*.Designer.cs 2>/dev/null | head -30
+```
+
+**Flag:**
+- TabIndex values that don't follow logical reading order (left-right, top-bottom)
+- Interactive controls with `TabStop = false` without justification
+- Missing tab index on new controls (gets default 0, disrupts existing order)
+
+---
+
+## Phase 4: Accessibility Audit
+
+```bash
+# Check for missing accessibility text
+grep -n "\.AccessibleName\|\.AccessibleDescription\|\.AccessibleRole" **/*.Designer.cs 2>/dev/null | head -20
+
+# Check for controls that need accessible names but don't have them
+grep -n "new System.Windows.Forms.Button\|new System.Windows.Forms.PictureBox" **/*.Designer.cs 2>/dev/null | head -20
+```
+
+**Flag:**
+- Buttons, PictureBoxes, or custom controls with no `AccessibleName` set
+- Labels used as group headers without `AccessibleRole = StaticText`
+- Error indicators (colored panels, icons) with no accessible text equivalent
+- ToolTip text missing on icon-only buttons
+
+---
+
+## Phase 5: Windows UX Guidelines Checklist
+
+Read each changed form's Designer.cs and apply these checks:
+
+**Naming & Labels:**
+- Control labels use sentence case ("Start homing" not "Start Homing" or "START HOMING")
+- Units are shown in labels (e.g., "Speed (mm/s):" not just "Speed:")
+- Error messages are specific — say what's wrong and what to do
+
+**Visual Grouping:**
+- Related controls are in GroupBox or Panel containers
+- GroupBox titles are short (≤20 chars) and descriptive
+- Dangerous operations (emergency stop, valve open) are visually separated from routine controls
+
+**Status & Feedback:**
+- Status changes (device connected/disconnected) are shown in StatusStrip, not pop-up dialogs
+- Long operations show progress (ProgressBar or animated indicator) — no frozen UI
+- Confirmation dialogs exist for irreversible operations (not just destructive ones)
+
+**Device Control Specific:**
+- Numeric input fields for device parameters have valid range shown (e.g., min/max in label or tooltip)
+- Move/activate buttons are disabled when device is not ready
+- Emergency stop button is visually prominent and always enabled
+
+---
+
+## Phase 6: Triage
+
+Sort all discovered findings by impact:
+
+- **High Impact:** Fix first. These cause operator errors or data loss.
+- **Medium Impact:** Fix next. These reduce usability or cause confusion.
+- **Polish:** Fix if time allows. These improve professionalism.
+
+Mark findings that cannot be fixed from source code (e.g., issues requiring hardware testing) as "deferred."
+
+---
+
+## Phase 7: Fix Loop
 
 For each fixable finding, in impact order:
 
-### 8a. Locate source
+### 7a. Locate source
 
 ```bash
-# Search for CSS classes, component names, style files
-# Glob for file patterns matching the affected page
+# Find the Designer.cs or Form.cs responsible
+grep -n "<control_name>" **/*.Designer.cs **/*.cs 2>/dev/null
 ```
 
-- Find the source file(s) responsible for the design issue
-- ONLY modify files directly related to the finding
-- Prefer CSS/styling changes over structural component changes
+### 7b. Fix
 
-### 8b. Fix
-
-- Read the source code, understand the context
+- Read the source file
 - Make the **minimal fix** — smallest change that resolves the design issue
-- CSS-only changes are preferred (safer, more reversible)
-- Do NOT refactor surrounding code, add features, or "improve" unrelated things
+- ONLY modify files directly related to the finding
+- Do NOT refactor surrounding code or add unrelated features
 
-### 8c. Commit
+### 7c. Commit
 
 ```bash
 git add <only-changed-files>
-git commit -m "style(design): FINDING-NNN — short description"
+git commit -m "style(ui): FINDING-NNN — short description"
 ```
 
 - One commit per fix. Never bundle multiple fixes.
-- Message format: `style(design): FINDING-NNN — short description`
 
-### 8d. Re-test
+### 7d. Verify
 
-Navigate back to the affected page and verify the fix:
+Re-read the modified Designer.cs or Form.cs to confirm the fix is correct.
 
-```bash
-$B goto <affected-url>
-$B screenshot "$REPORT_DIR/screenshots/finding-NNN-after.png"
-$B console --errors
-$B snapshot -D
-```
+### 7e. Classify
 
-Take **before/after screenshot pair** for every fix.
+- **verified**: re-read confirms the fix is syntactically correct and addresses the finding
+- **best-effort**: fix applied but requires runtime testing to fully verify
+- **reverted**: introduced an error → `git revert HEAD` → mark finding as "deferred"
 
-### 8e. Classify
+### 7f. Self-Regulation (STOP AND EVALUATE)
 
-- **verified**: re-test confirms the fix works, no new errors introduced
-- **best-effort**: fix applied but couldn't fully verify (e.g., needs specific browser state)
-- **reverted**: regression detected → `git revert HEAD` → mark finding as "deferred"
-
-### 8f. Self-Regulation (STOP AND EVALUATE)
-
-Every 5 fixes (or after any revert), compute the design-fix risk level:
+Every 5 fixes, compute risk level:
 
 ```
 DESIGN-FIX RISK:
   Start at 0%
-  Each revert:                        +15%
-  Each CSS-only file change:          +0%   (safe — styling only)
-  Each JSX/TSX/component file change: +5%   per file
-  After fix 10:                       +1%   per additional fix
-  Touching unrelated files:           +20%
+  Each revert:                          +15%
+  Each Designer.cs change:              +3% per file
+  Each Form.cs logic change:            +8% per file
+  After fix 10:                         +1% per additional fix
+  Touching unrelated files:             +20%
 ```
 
-**If risk > 20%:** STOP immediately. Show the user what you've done so far. Ask whether to continue.
+**If risk > 25%:** STOP. Show the user what you've done so far. Ask whether to continue.
 
-**Hard cap: 30 fixes.** After 30 fixes, stop regardless of remaining findings.
-
----
-
-## Phase 9: Final Design Audit
-
-After all fixes are applied:
-
-1. Re-run the design audit on all affected pages
-2. Compute final design score and AI slop score
-3. **If final scores are WORSE than baseline:** WARN prominently — something regressed
+**Hard cap: 20 fixes.** After 20 fixes, stop regardless.
 
 ---
 
-## Phase 10: Report
+## Phase 8: Final Report
 
 Write the report to both local and project-scoped locations:
 
-**Local:** `.gstack/design-reports/design-audit-{domain}-{YYYY-MM-DD}.md`
+**Local:** `.gstack/design-reports/ui-audit-{YYYY-MM-DD}.md`
 
 **Project-scoped:**
 ```bash
 SLUG=$(git remote get-url origin 2>/dev/null | sed 's|.*[:/]\([^/]*/[^/]*\)\.git$|\1|;s|.*[:/]\([^/]*/[^/]*\)$|\1|' | tr '/' '-')
 mkdir -p ~/.gstack/projects/$SLUG
 ```
-Write to `~/.gstack/projects/{slug}/{user}-{branch}-design-audit-{datetime}.md`
+Write to `~/.gstack/projects/{slug}/{user}-{branch}-ui-audit-{datetime}.md`
 
-**Per-finding additions** (beyond standard design audit report):
+**Per-finding additions:**
 - Fix Status: verified / best-effort / reverted / deferred
 - Commit SHA (if fixed)
 - Files Changed (if fixed)
-- Before/After screenshots (if fixed)
 
 **Summary section:**
 - Total findings
 - Fixes applied (verified: X, best-effort: Y, reverted: Z)
 - Deferred findings
-- Design score delta: baseline → final
-- AI slop score delta: baseline → final
-
-**PR Summary:** Include a one-line summary suitable for PR descriptions:
-> "Design review found N issues, fixed M. Design score X → Y, AI slop score X → Y."
 
 ---
 
-## Phase 11: TODOS.md Update
+## Phase 9: TODOS.md Update
 
 If the repo has a `TODOS.md`:
 
-1. **New deferred design findings** → add as TODOs with impact level, category, and description
+1. **New deferred UI findings** → add as TODOs with impact level and description
 2. **Fixed findings that were in TODOS.md** → annotate with "Fixed by /qa-design-review on {branch}, {date}"
 
 ---
 
-## Additional Rules (qa-design-review specific)
+## Additional Rules
 
 11. **Clean working tree required.** Refuse to start if `git status --porcelain` is non-empty.
-12. **One commit per fix.** Never bundle multiple design fixes into one commit.
-13. **Never modify tests or CI configuration.** Only fix application source code and styles.
-14. **Revert on regression.** If a fix makes things worse, `git revert HEAD` immediately.
-15. **Self-regulate.** Follow the design-fix risk heuristic. When in doubt, stop and ask.
-16. **CSS-first.** Prefer CSS/styling changes over structural component changes. CSS-only changes are safer and more reversible.
-17. **DESIGN.md export.** You MAY write a DESIGN.md file if the user accepts the offer from Phase 2.
+12. **One commit per fix.** Never bundle multiple UI fixes.
+13. **Never modify device control logic.** Only fix UI source (Designer.cs, Form.cs layout/event wiring, resource files).
+14. **Revert on regression.** If a fix introduces a compile error, `git revert HEAD` immediately.
+15. **DESIGN.md export.** You MAY write a DESIGN.md file if the user accepts the offer from Phase 5.
