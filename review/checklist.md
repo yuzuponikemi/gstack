@@ -5,7 +5,7 @@
 Review the `git diff origin/main` output for the issues listed below. Be specific — cite `file:line` and suggest fixes. Skip anything that's fine. Only flag real problems.
 
 **Two-pass review:**
-- **Pass 1 (CRITICAL):** Run SQL & Data Safety and LLM Output Trust Boundary first. Highest severity.
+- **Pass 1 (CRITICAL):** Run Hardware Safety, Thread Safety, Resource Management, and State Machine Completeness first. Highest severity.
 - **Pass 2 (INFORMATIONAL):** Run all remaining categories. Lower severity but still actioned.
 
 All findings get action via Fix-First Review: obvious mechanical fixes are applied automatically,
@@ -34,89 +34,76 @@ Be terse. For each issue: one line describing the problem, one line with the fix
 
 ### Pass 1 — CRITICAL
 
-#### SQL & Data Safety
-- String interpolation in SQL (even if values are `.to_i`/`.to_f` — use `sanitize_sql_array` or Arel)
-- TOCTOU races: check-then-set patterns that should be atomic `WHERE` + `update_all`
-- `update_column`/`update_columns` bypassing validations on fields that have or should have constraints
-- N+1 queries: `.includes()` missing for associations used in loops/views (especially avatar, attachments)
+#### Hardware Safety
+- Stage move commands sent without soft-limit check — hitting hard limits causes mechanical damage
+- Pneumatic valve open/close sequence differs from defined safe order (e.g., pressurizing before exhausting)
+- Fluid control commands sent without flow rate or pressure upper-bound validation
+- Interlock conditions (other axis state, air pressure confirmation, etc.) bypassed by a conditional branch
+- `finally` block missing: on exception, device is not returned to safe state (stage stop, valve close, camera stop)
+- New device command added but emergency-stop handler does not cover it
 
-#### Race Conditions & Concurrency
-- Read-check-write without uniqueness constraint or `rescue RecordNotUnique; retry` (e.g., `where(hash:).first` then `save!` without handling concurrent insert)
-- `find_or_create_by` on columns without unique DB index — concurrent calls can create duplicates
-- Status transitions that don't use atomic `WHERE old_status = ? UPDATE SET new_status` — concurrent updates can skip or double-apply transitions
-- `html_safe` on user-controlled data (XSS) — check any `.html_safe`, `raw()`, or string interpolation into `html_safe` output
+#### Thread Safety (WinForms)
+- `Control.Text` / `Control.Visible` / `Control.Enabled` updated directly from a non-UI thread without `InvokeRequired` check
+- Device objects (stage controller, valve driver, etc.) accessed concurrently from multiple threads without `lock`
+- Exceptions inside `BackgroundWorker` / `Task` swallowed and never surfaced to the UI
+- Long device-wait loop does not accept `CancellationToken` — process cannot be stopped cleanly
 
-#### LLM Output Trust Boundary
-- LLM-generated values (emails, URLs, names) written to DB or passed to mailers without format validation. Add lightweight guards (`EMAIL_REGEXP`, `URI.parse`, `.strip`) before persisting.
-- Structured tool output (arrays, hashes) accepted without type/shape checks before database writes.
+#### Resource Management
+- `SerialPort`, USB device, or camera SDK object not wrapped in `using` or `Dispose()` not called on error path
+- Camera image buffer not released — leads to memory exhaustion in long-running sessions
+- Partial resource acquisition on connection failure not cleaned up (e.g., port opened but camera init fails)
 
-#### Enum & Value Completeness
-When the diff introduces a new enum value, status string, tier name, or type constant:
-- **Trace it through every consumer.** Read (don't just grep — READ) each file that switches on, filters by, or displays that value. If any consumer doesn't handle the new value, flag it. Common miss: adding a value to the frontend dropdown but the backend model/compute method doesn't persist it.
-- **Check allowlists/filter arrays.** Search for arrays or `%w[]` lists containing sibling values (e.g., if adding "revise" to tiers, find every `%w[quick lfg mega]` and verify "revise" is included where needed).
-- **Check `case`/`if-elsif` chains.** If existing code branches on the enum, does the new value fall through to a wrong default?
-To do this: use Grep to find all references to the sibling values (e.g., grep for "lfg" or "mega" to find all tier consumers). Read each match. This step requires reading code OUTSIDE the diff.
+#### State Machine Completeness
+- New value added to device state enum (`Idle` / `Homing` / `Moving` / `Error` etc.) but not handled in all `switch` statements
+- Move command accepted while device is in `Homing` or `Error` state — must be rejected
+- Disconnect/reconnect path does not reset internal state to `Idle`
+
+---
 
 ### Pass 2 — INFORMATIONAL
 
-#### Conditional Side Effects
-- Code paths that branch on a condition but forget to apply a side effect on one branch. Example: item promoted to verified but URL only attached when a secondary condition is true — the other branch promotes without the URL, creating an inconsistent record.
-- Log messages that claim an action happened but the action was conditionally skipped. The log should reflect what actually occurred.
+#### Timeout & Polling
+- Device response wait loop (`while (true)`) has no timeout upper bound
+- Polling interval is a magic number in `Thread.Sleep()` — should be a named constant
+- Communication timeout value duplicated between `SerialPort.ReadTimeout` and application-level retry logic, risking drift
 
-#### Magic Numbers & String Coupling
-- Bare numeric literals used in multiple files — should be named constants documented together
-- Error message strings used as query filters elsewhere (grep for the string — is anything matching on it?)
+#### Coordinate & Unit Consistency
+- Stage coordinate units (mm / μm / pulses) mixed across methods without explicit conversion
+- Camera-to-stage coordinate transform matrix hardcoded inline instead of a named calibration constant
+- Flow rate or pressure unit conversion duplicated in multiple places — single utility method preferred
+
+#### Error Handling Quality
+- `catch (Exception e)` logs the error but does not reset device state — device left in unknown state
+- Error message exposes raw SDK error code with no operator-readable explanation
+- Communication error retry loop has no maximum retry count — can loop indefinitely
+
+#### Camera-Specific
+- Stage move command can be issued while camera exposure is in progress — causes motion blur in acquired image
+- On image acquisition timeout, camera remains in acquisition mode — subsequent captures fail silently
+- `Bitmap` assigned to `PictureBox.Image` for live preview without calling `Dispose()` on the previous value — GDI resource leak
+
+#### Testability & Diagnostics
+- Device send/receive calls not abstracted behind an interface — UI cannot be tested without physical hardware
+- Communication log (timestamped byte-level send/receive) not recorded — fault analysis is difficult
+- Magic threshold values (pressure limits, stage speed caps, flow rate maxima) not centralized — hard to audit safety parameters
 
 #### Dead Code & Consistency
 - Variables assigned but never read
 - Version mismatch between PR title and VERSION/CHANGELOG files
-- CHANGELOG entries that describe changes inaccurately (e.g., "changed from X to Y" when X never existed)
-- Comments/docstrings that describe old behavior after the code changed
-
-#### LLM Prompt Issues
-- 0-indexed lists in prompts (LLMs reliably return 1-indexed)
-- Prompt text listing available tools/capabilities that don't match what's actually wired up in the `tool_classes`/`tools` array
-- Word/token limits stated in multiple places that could drift
-
-#### Test Gaps
-- Negative-path tests that assert type/status but not the side effects (URL attached? field populated? callback fired?)
-- Assertions on string content without checking format (e.g., asserting title present but not URL format)
-- `.expects(:something).never` missing when a code path should explicitly NOT call an external service
-- Security enforcement features (blocking, rate limiting, auth) without integration tests verifying the enforcement path works end-to-end
-
-#### Crypto & Entropy
-- Truncation of data instead of hashing (last N chars instead of SHA-256) — less entropy, easier collisions
-- `rand()` / `Random.rand` for security-sensitive values — use `SecureRandom` instead
-- Non-constant-time comparisons (`==`) on secrets or tokens — vulnerable to timing attacks
-
-#### Time Window Safety
-- Date-key lookups that assume "today" covers 24h — report at 8am PT only sees midnight→8am under today's key
-- Mismatched time windows between related features — one uses hourly buckets, another uses daily keys for the same data
-
-#### Type Coercion at Boundaries
-- Values crossing Ruby→JSON→JS boundaries where type could change (numeric vs string) — hash/digest inputs must normalize types
-- Hash/digest inputs that don't call `.to_s` or equivalent before serialization — `{ cores: 8 }` vs `{ cores: "8" }` produce different hashes
-
-#### View/Frontend
-- Inline `<style>` blocks in partials (re-parsed every render)
-- O(n*m) lookups in views (`Array#find` in a loop instead of `index_by` hash)
-- Ruby-side `.select{}` filtering on DB results that could be a `WHERE` clause (unless intentionally avoiding leading-wildcard `LIKE`)
+- Comments or docstrings describing old behavior after code changed
 
 ---
 
 ## Severity Classification
 
 ```
-CRITICAL (highest severity):      INFORMATIONAL (lower severity):
-├─ SQL & Data Safety              ├─ Conditional Side Effects
-├─ Race Conditions & Concurrency  ├─ Magic Numbers & String Coupling
-├─ LLM Output Trust Boundary      ├─ Dead Code & Consistency
-└─ Enum & Value Completeness      ├─ LLM Prompt Issues
-                                   ├─ Test Gaps
-                                   ├─ Crypto & Entropy
-                                   ├─ Time Window Safety
-                                   ├─ Type Coercion at Boundaries
-                                   └─ View/Frontend
+CRITICAL (highest severity):          INFORMATIONAL (lower severity):
+├─ Hardware Safety                    ├─ Timeout & Polling
+├─ Thread Safety (WinForms)           ├─ Coordinate & Unit Consistency
+├─ Resource Management                ├─ Error Handling Quality
+└─ State Machine Completeness         ├─ Camera-Specific
+                                      ├─ Testability & Diagnostics
+                                      └─ Dead Code & Consistency
 
 All findings are actioned via Fix-First Review. Severity determines
 presentation order and classification of AUTO-FIX vs ASK — critical
@@ -133,33 +120,29 @@ the agent auto-fixes a finding or asks the user.
 
 ```
 AUTO-FIX (agent fixes without asking):     ASK (needs human judgment):
-├─ Dead code / unused variables            ├─ Security (auth, XSS, injection)
-├─ N+1 queries (missing .includes())      ├─ Race conditions
-├─ Stale comments contradicting code       ├─ Design decisions
-├─ Magic numbers → named constants         ├─ Large fixes (>20 lines)
-├─ Missing LLM output validation           ├─ Enum completeness
-├─ Version/path mismatches                 ├─ Removing functionality
-├─ Variables assigned but never read       └─ Anything changing user-visible
-└─ Inline styles, O(n*m) view lookups        behavior
+├─ Magic numbers → named constants         ├─ Interlock condition changes
+├─ Add InvokeRequired / Invoke() wrap      ├─ Soft-limit value changes
+├─ Wrap resource in using block            ├─ Valve sequence changes
+├─ Add timeout upper bound                 ├─ Safe-state recovery logic
+├─ Add communication log call              ├─ Coordinate transform corrections
+├─ Dead code / unused variables            ├─ Large fixes (>20 lines)
+└─ Stale comments contradicting code       └─ Anything changing device behavior
 ```
 
 **Rule of thumb:** If the fix is mechanical and a senior engineer would apply it
 without discussion, it's AUTO-FIX. If reasonable engineers could disagree about
-the fix, it's ASK.
+the fix — especially when physical hardware safety is involved — it's ASK.
 
-**Critical findings default toward ASK** (they're inherently riskier).
+**Critical findings default toward ASK** (hardware safety mistakes can cause
+physical damage or injury).
 **Informational findings default toward AUTO-FIX** (they're more mechanical).
 
 ---
 
 ## Suppressions — DO NOT flag these
 
-- "X is redundant with Y" when the redundancy is harmless and aids readability (e.g., `present?` redundant with `length > 20`)
-- "Add a comment explaining why this threshold/constant was chosen" — thresholds change during tuning, comments rot
+- "Add a comment explaining why this threshold was chosen" — thresholds are tuned empirically and change constantly
 - "This assertion could be tighter" when the assertion already covers the behavior
-- Suggesting consistency-only changes (wrapping a value in a conditional to match how another constant is guarded)
-- "Regex doesn't handle edge case X" when the input is constrained and X never occurs in practice
-- "Test exercises multiple guards simultaneously" — that's fine, tests don't need to isolate every guard
-- Eval threshold changes (max_actionable, min scores) — these are tuned empirically and change constantly
-- Harmless no-ops (e.g., `.reject` on an element that's never in the array)
+- Suggesting consistency-only changes that don't affect correctness or safety
+- Harmless no-ops that don't affect device state
 - ANYTHING already addressed in the diff you're reviewing — read the FULL diff before commenting

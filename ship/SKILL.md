@@ -150,19 +150,18 @@ git fetch origin <base> && git merge origin/<base> --no-edit
 
 ## Step 3: Run tests (on merged code)
 
-**Do NOT run `RAILS_ENV=test bin/rails db:migrate`** — `bin/test-lane` already calls
-`db:test:prepare` internally, which loads the schema into the correct lane database.
-Running bare test migrations without INSTANCE hits an orphan DB and corrupts structure.sql.
+Detect and run the project's test suite. Look for a test runner configuration in this order:
+1. `dotnet test` — if a `.sln` or `*Tests.csproj` file exists
+2. A `Makefile` target named `test` — if a Makefile exists
+3. A script at `scripts/run-tests.sh` or similar
 
-Run both test suites in parallel:
+Run the test suite:
 
 ```bash
-bin/test-lane 2>&1 | tee /tmp/ship_tests.txt &
-npm run test 2>&1 | tee /tmp/ship_vitest.txt &
-wait
+dotnet test --logger "console;verbosity=normal" 2>&1 | tee /tmp/ship_tests.txt
 ```
 
-After both complete, read the output files and check pass/fail.
+After completing, read the output file and check pass/fail.
 
 **If any test fails:** Show the failures and **STOP**. Do not proceed.
 
@@ -170,67 +169,6 @@ After both complete, read the output files and check pass/fail.
 
 ---
 
-## Step 3.25: Eval Suites (conditional)
-
-Evals are mandatory when prompt-related files change. Skip this step entirely if no prompt files are in the diff.
-
-**1. Check if the diff touches prompt-related files:**
-
-```bash
-git diff origin/<base> --name-only
-```
-
-Match against these patterns (from CLAUDE.md):
-- `app/services/*_prompt_builder.rb`
-- `app/services/*_generation_service.rb`, `*_writer_service.rb`, `*_designer_service.rb`
-- `app/services/*_evaluator.rb`, `*_scorer.rb`, `*_classifier_service.rb`, `*_analyzer.rb`
-- `app/services/concerns/*voice*.rb`, `*writing*.rb`, `*prompt*.rb`, `*token*.rb`
-- `app/services/chat_tools/*.rb`, `app/services/x_thread_tools/*.rb`
-- `config/system_prompts/*.txt`
-- `test/evals/**/*` (eval infrastructure changes affect all suites)
-
-**If no matches:** Print "No prompt-related files changed — skipping evals." and continue to Step 3.5.
-
-**2. Identify affected eval suites:**
-
-Each eval runner (`test/evals/*_eval_runner.rb`) declares `PROMPT_SOURCE_FILES` listing which source files affect it. Grep these to find which suites match the changed files:
-
-```bash
-grep -l "changed_file_basename" test/evals/*_eval_runner.rb
-```
-
-Map runner → test file: `post_generation_eval_runner.rb` → `post_generation_eval_test.rb`.
-
-**Special cases:**
-- Changes to `test/evals/judges/*.rb`, `test/evals/support/*.rb`, or `test/evals/fixtures/` affect ALL suites that use those judges/support files. Check imports in the eval test files to determine which.
-- Changes to `config/system_prompts/*.txt` — grep eval runners for the prompt filename to find affected suites.
-- If unsure which suites are affected, run ALL suites that could plausibly be impacted. Over-testing is better than missing a regression.
-
-**3. Run affected suites at `EVAL_JUDGE_TIER=full`:**
-
-`/ship` is a pre-merge gate, so always use full tier (Sonnet structural + Opus persona judges).
-
-```bash
-EVAL_JUDGE_TIER=full EVAL_VERBOSE=1 bin/test-lane --eval test/evals/<suite>_eval_test.rb 2>&1 | tee /tmp/ship_evals.txt
-```
-
-If multiple suites need to run, run them sequentially (each needs a test lane). If the first suite fails, stop immediately — don't burn API cost on remaining suites.
-
-**4. Check results:**
-
-- **If any eval fails:** Show the failures, the cost dashboard, and **STOP**. Do not proceed.
-- **If all pass:** Note pass counts and cost. Continue to Step 3.5.
-
-**5. Save eval output** — include eval results and cost dashboard in the PR body (Step 8).
-
-**Tier reference (for context — /ship always uses `full`):**
-| Tier | When | Speed (cached) | Cost |
-|------|------|----------------|------|
-| `fast` (Haiku) | Dev iteration, smoke tests | ~5s (14x faster) | ~$0.07/run |
-| `standard` (Sonnet) | Default dev, `bin/test-lane --eval` | ~17s (4x faster) | ~$0.37/run |
-| `full` (Opus persona) | **`/ship` and pre-merge** | ~72s (baseline) | ~$1.27/run |
-
----
 
 ## Step 3.5: Pre-Landing Review
 
@@ -241,7 +179,7 @@ Review the diff for structural issues that tests don't catch.
 2. Run `git diff origin/<base>` to get the full diff (scoped to feature changes against the freshly-fetched base branch).
 
 3. Apply the review checklist in two passes:
-   - **Pass 1 (CRITICAL):** SQL & Data Safety, LLM Output Trust Boundary
+   - **Pass 1 (CRITICAL):** Hardware Safety, Thread Safety, Resource Management, State Machine Completeness
    - **Pass 2 (INFORMATIONAL):** All remaining categories
 
 4. **Classify each finding as AUTO-FIX or ASK** per the Fix-First Heuristic in
@@ -410,9 +348,9 @@ Save this summary — it goes into the PR body in Step 8.
 1. Analyze the diff and group changes into logical commits. Each commit should represent **one coherent change** — not one file, but one logical unit.
 
 2. **Commit ordering** (earlier commits first):
-   - **Infrastructure:** migrations, config changes, route additions
-   - **Models & services:** new models, services, concerns (with their tests)
-   - **Controllers & views:** controllers, views, JS/React components (with their tests)
+   - **Infrastructure:** config changes, new project references, device SDK additions
+   - **Core logic:** device controllers, service layers, data models (with their tests)
+   - **UI:** forms, panels, WinForms components (with their tests)
    - **VERSION + CHANGELOG + TODOS.md:** always in the final commit
 
 3. **Rules for splitting:**
@@ -463,9 +401,6 @@ gh pr create --base <base> --title "<type>: <summary>" --body "$(cat <<'EOF'
 ## Pre-Landing Review
 <findings from Step 3.5, or "No issues found.">
 
-## Eval Results
-<If evals ran: suite names, pass/fail counts, cost dashboard summary. If skipped: "No prompt-related files changed — evals skipped.">
-
 ## Greptile Review
 <If Greptile comments were found: bullet list with [FIXED] / [FALSE POSITIVE] / [ALREADY FIXED] tag + one-line summary per comment>
 <If no Greptile comments found: "No Greptile comments.">
@@ -478,8 +413,7 @@ gh pr create --base <base> --title "<type>: <summary>" --body "$(cat <<'EOF'
 <If TODOS.md doesn't exist and user skipped: omit this section>
 
 ## Test plan
-- [x] All Rails tests pass (N runs, 0 failures)
-- [x] All Vitest tests pass (N tests)
+- [x] All dotnet tests pass (N tests, 0 failures)
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
 EOF
